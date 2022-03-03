@@ -13,7 +13,7 @@ from processing import LoadData
 from utils import visualize_Result
 from utils import compute_performance
 from baseline import GATNet, GCN, ChebNet
-from test import GATNet2
+from GATandVariant import GATNet2
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
