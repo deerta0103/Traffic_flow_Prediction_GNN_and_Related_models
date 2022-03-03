@@ -1,229 +1,123 @@
-# -*- coding: utf-8 -*-
-
+import os
+import time
 import torch
-import torch.nn as nn
-import torch.nn.init as init
+import h5py
+import numpy as np
+from torch.utils.data import DataLoader
+import torch.optim as optim
 import torch.nn.functional as F
-#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-"""
-    该.py 文件中实现了三种图卷积网络，GCN，ChebNet，GAT。
-    可以直接在train.py中修改模型模型和参数切换三种模型。
-
-"""
-class ChebConv(nn.Module):
-    """
-    The ChebNet convolution operation.
-
-    :param in_c: int, number of input channels.
-    :param out_c: int, number of output channels.
-    :param K: int, the order of Chebyshev Polynomial.
-    """
-    def __init__(self, in_c, out_c, K, bias=True, normalize=True):
-        super(ChebConv, self).__init__()
-        self.normalize = normalize
-
-        self.weight = nn.Parameter(torch.Tensor(K + 1, 1, in_c, out_c))  # [K+1, 1, in_c, out_c]
-        init.xavier_normal_(self.weight)
-
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(1, 1, out_c))
-            init.zeros_(self.bias)
-        else:
-            self.register_parameter("bias", None)
-
-        self.K = K + 1
-
-    def forward(self, inputs, graph):
-        """
-        :param inputs: the input data, [B, N, C]
-        :param graph: the graph structure, [N, N]
-        :return: convolution result, [B, N, D]
-        """
-        L = ChebConv.get_laplacian(graph, self.normalize)  # [N, N]
-        mul_L = self.cheb_polynomial(L).unsqueeze(1)   # [K, 1, N, N]
-
-        result = torch.matmul(mul_L, inputs)  # [K, B, N, C]
-        result = torch.matmul(result, self.weight)  # [K, B, N, D]
-        result = torch.sum(result, dim=0) + self.bias  # [B, N, D]
-
-        return result
-
-    def cheb_polynomial(self, laplacian):
-        """
-        Compute the Chebyshev Polynomial, according to the graph laplacian.
-
-        :param laplacian: the graph laplacian, [N, N].
-        :return: the multi order Chebyshev laplacian, [K, N, N].
-        """
-        N = laplacian.size(0)  # [N, N]
-        multi_order_laplacian = torch.zeros([self.K, N, N], device=laplacian.device, dtype=torch.float)  # [K, N, N]
-        multi_order_laplacian[0] = torch.eye(N, device=laplacian.device, dtype=torch.float)
-
-        if self.K == 1:
-            return multi_order_laplacian
-        else:
-            multi_order_laplacian[1] = laplacian
-            if self.K == 2:
-                return multi_order_laplacian
-            else:
-                for k in range(2, self.K):
-                    multi_order_laplacian[k] = 2 * torch.mm(laplacian, multi_order_laplacian[k-1]) - \
-                                               multi_order_laplacian[k-2]
-
-        return multi_order_laplacian
-
-    @staticmethod
-    def get_laplacian(graph, normalize):
-        """
-        return the laplacian of the graph.
-
-        :param graph: the graph structure without self loop, [N, N].
-        :param normalize: whether to used the normalized laplacian.
-        :return: graph laplacian.
-        """
-        if normalize:
-
-            D = torch.diag(torch.sum(graph, dim=-1) ** (-1 / 2))
-            L = torch.eye(graph.size(0), device=graph.device, dtype=graph.dtype) - torch.mm(torch.mm(D, graph), D)
-        else:
-            D = torch.diag(torch.sum(graph, dim=-1))
-            L = D - graph
-        return L
 
 
-class ChebNet(nn.Module):
-    def __init__(self, in_c, hid_c, out_c, K):
-        """
-        :param in_c: int, number of input channels.
-        :param hid_c: int, number of hidden channels.
-        :param out_c: int, number of output channels.
-        :param K:
-        """
-        super(ChebNet, self).__init__()
-        self.conv1 = ChebConv(in_c=in_c, out_c=hid_c, K=K)
-        self.conv2 = ChebConv(in_c=hid_c, out_c=out_c, K=K)
-        self.act = nn.ReLU()
+from processing import LoadData
+#fromutils import Evaluation
+from utils import visualize_Result
+from utils import compute_performance
+from baseline import GATNet, GCN, ChebNet
+from test import GATNet2
 
-    def forward(self, data, device):
-        graph_data = data["graph"].to(device)[0]  # [N, N]
-        flow_x = data["flow_x"].to(device)  # [B, N, H, D]
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-        B, N = flow_x.size(0), flow_x.size(1)
+train_Data = LoadData(data_path = ["PeMS_04/PeMS04.csv", "PeMS_04/PeMS04.npz"], num_nodes = 307, divide_days =[45, 14],
+                      time_interval = 5, history_length=6, train_mode = "train")
+train_loader = DataLoader(train_Data, batch_size = 64, shuffle = False, num_workers = 8)
+test_data = LoadData(data_path = ["PeMS_04/PeMS04.csv", "PeMS_04/PeMS04.npz"], num_nodes = 307, divide_days =[45, 14],
+                      time_interval = 5, history_length=6, train_mode = "test")
+test_loader = DataLoader(test_data, batch_size = 64, shuffle = False, num_workers = 8)
 
-        flow_x = flow_x.view(B, N, -1)  # [B, N, H*D]
+# model design
+#net = GATNet(input_dim=6 * 1, hidden_dim=6, output_dim=1, n_heads=2)
+#net = GCN(input_dim=6 * 1, hidden_dim=6, output_dim=1)
+net = ChebNet(input_dim=6 * 1,  hidden_dim=6, output_dim=1, K=2)
+#net = GATNet2(input_dim= 1,  hidden_dim=6, output_dim=1, n_heads = 2,T = 6)
+#device = torch.device("cuda" if torch.cuda.is_avaliable() else "cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda:0")
+    print("running on the GPU")
+else:
+    device = torch.device("cpu")
+    print("running on the CPU")
+net = net.to(device)
 
-        output_1 = self.act(self.conv1(flow_x, graph_data))
-        output_2 = self.act(self.conv2(output_1, graph_data))
+# loss and optimizer
+criterion = torch.nn.MSELoss()
+optimizer = optim.Adam(params = net.parameters())
 
-        return output_2.unsqueeze(2)
+# train
+Epoch = 10
+loss_train_plt = []
 
-class GCN(nn.Module):
-    def __init__(self, in_c, hid_c, out_c):
-        super(GCN, self).__init__()
-        self.linear_1 = nn.Linear(in_c, hid_c)
-        self.linear_2 = nn.Linear(hid_c, out_c)
-        self.act = nn.ReLU()
+net.train()
+for epoch in range(Epoch):
+    epoch_loss = 0.0
+    start_time = time.time()
+    for data in train_loader:
+        net.zero_grad()
+        predict = net(data, device).to(torch.device("cpu"))
+        data_y = data["flow_y"]
+        loss = criterion(predict,data_y)
+        
+        epoch_loss = loss.item()
+        
+        loss.backward()
 
-    def forward(self, data, device):
-        graph_data = data["graph"].to(device)[0]  # [N, N]
-        graph_data = GCN.process_graph(graph_data)
+        optimizer.step()  # 更新参数
+    end_time = time.time()
+    loss_train_plt.append(10*epoch_loss / len(train_Data) / 64)
+    
+    print("Epoch: {:04d}, Loss: {:02.4f}, TIme: {:02.2f} mins".format(epoch, 1000 * epoch_loss/len(train_Data), (end_time-start_time)/60))
 
-        flow_x = data["flow_x"].to(device)  # [B, N, H, D]
-        B, N = flow_x.size(0), flow_x.size(1)
+# Test
+net.eval()
+with torch.no_grad():
+    MAE, MAPE, RMSE = [], [], []
+    Target = np.zeros([307, 1, 1])  # [N, T, D]
+    Predict = np.zeros_like(Target)
+    
+    total_loss = 0.0
+    for data in test_loader: # for each batch
+        predict_value = net(data, device).to(torch.device("cpu"))
+        loss = criterion(predict_value, data["flow_y"])
+        total_loss +=loss.item()
 
-        flow_x = flow_x.view(B, N, -1)  # [B, N, H*D]  H = 6, D = 1
+        predict_value = predict_value.transpose(0, 2).squeeze(0)  # [1, N, B(T), D] -> [N, B(T), D] -> [N, T, D]
+        target_value = data["flow_y"].transpose(0, 2).squeeze(0)
+        
+        performance, data_save = compute_performance(predict_value, target_value, test_loader)
+        
+        # concatenate each time slot
+        Predict = np.concatenate([Predict, data_save[0]], axis =1)
+        Target = np.concatenate([Target, data_save[1]], axis = 1)
+        
+        MAE.append(performance[0])
+        MAPE.append(performance[1])
+        RMSE.append(performance[2])
+        
+    print("Test loss: {:02.4f}".format(1000 * total_loss / len(test_data)))
+    
+print("Performance: MAE {:2.2f}, MAPE {:2.2f}, RMSE {:2.2f}".format(np.mean(MAE), np.mean(MAPE), np.mean(RMSE)))
 
-        output_1 = self.linear_1(flow_x)  # [B, N, hid_C]
-        output_1 = self.act(torch.matmul(graph_data, output_1))  # [N, N], [B, N, Hid_C]
-        output_2 = self.linear_2(output_1)
-        output_2 = self.act(torch.matmul(graph_data, output_2))  # [B, N, 1, Out_C]
+Predict = np.delete(Predict, 0, axis =1)
+Target = np.delete(Target, 0, axis =1)
 
-        return output_2.unsqueeze(2)
+result_file = "GAT_result.h5"
+file_obj = h5py.File(result_file, "w")
 
-    @staticmethod
-    def process_graph(graph_data):
-        N = graph_data.size(0)
-        matrix_i = torch.eye(N, dtype=graph_data.dtype, device=graph_data.device)
-        graph_data += matrix_i  # A~ [N, N]
-
-        degree_matrix = torch.sum(graph_data, dim=-1, keepdim=False)  # [N]
-        degree_matrix = degree_matrix.pow(-1)
-        degree_matrix[degree_matrix == float("inf")] = 0.  # [N]
-
-        degree_matrix = torch.diag(degree_matrix)  # [N, N]
-        result = torch.mm(degree_matrix, graph_data)
-
-        return result  # D^(-1) * A = \hat(A)
-
-
-# 图注意力层的定义
-class GraphAttentionLayer(nn.Module):
-    def __init__(self, in_c, out_c):
-        super(GraphAttentionLayer, self).__init__()
-        self.in_c = in_c
-        self.out_c = out_c
-        self.F = F.softmax
-
-        self.W = nn.Linear(in_c, out_c, bias=False)  # y = W * x
-        nn.init.normal_(self.W.weight) # initialization
-        self.b = nn.Parameter(torch.Tensor(out_c))
-        nn.init.normal_(self.b)
-
-    def forward(self, inputs, graph):
-        """
-        :param inputs: input features, [B, N, C].
-        :param graph: graph structure, [N, N].
-        :return:
-            output features, [B, N, D].
-        """
-
-        h = self.W(inputs)  # [B, N, D]
-        outputs = torch.bmm(h, h.transpose(1, 2)) * graph.unsqueeze(0)  # [B, N, N]      x(i)^T * x(j)
-        outputs.data.masked_fill_(torch.eq(outputs, 0), -float(1e16))   # x(i)|| x(j)
-
-        attention = self.F(outputs, dim=2)   # [B, N, N]
-        return torch.bmm(attention, h) + self.b  # [B, N, N] * [B, N, D]
-
-
-class GATSubNet(nn.Module):
-    def __init__(self, in_c, hid_c, out_c, n_heads):
-        super(GATSubNet, self).__init__()
-
-        self.attention_module = nn.ModuleList([GraphAttentionLayer(in_c, hid_c) for _ in range(n_heads)])
-        self.out_att = GraphAttentionLayer(hid_c * n_heads, out_c)
-
-        self.act = nn.LeakyReLU()
-
-    def forward(self, inputs, graph):
-        """
-        :param inputs: [B, N, C]
-        :param graph: [N, N]
-        :return:
-        """
-        outputs = torch.cat([attn(inputs, graph) for attn in self.attention_module], dim=-1)  # [B, N, hid_c * h_head]
-        outputs = self.act(outputs)
-
-        outputs = self.out_att(outputs, graph)
-
-        return self.act(outputs)
+file_obj["predict"] = Predict
+file_obj["target"] = Target
 
 
 
-# GAT 网络的定义
-class GATNet(nn.Module):
-    def __init__(self, in_c, hid_c, out_c, n_heads):
-        super(GATNet, self).__init__()
-        self.subnet = GATSubNet(in_c, hid_c, out_c, n_heads)
-
-    def forward(self, data, device):
-        graph = data["graph"][0].to(device)  # [N, N]
-        flow = data["flow_x"]  # [B, N, T, C]
-        flow = flow.to(device)
-
-        B, N = flow.size(0), flow.size(1)
-        flow = flow.view(B, N, -1)  # [B, N, T * C]
+visualize_Result(h5_file = "GAT_result.h5",
+                 nodes_id = 120,
+                 time_se = [0, 24*12*2],
+                 visualize_file = "gat_node_120",
+                 loss = loss_train_plt)
 
 
-        prediction = self.subnet(flow, graph).unsqueeze(2)  # [B, N, 1, C]
+    
+    
+    
 
-        return prediction
+
+
+
